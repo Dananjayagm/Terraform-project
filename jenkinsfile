@@ -1,0 +1,81 @@
+pipeline {
+    agent any
+
+    environment {
+        AWS_DEFAULT_REGION = 'us-west-2' 
+        ECR_REPO_URI = '****-ecr-repo-uri' 
+        CLUSTER_NAME = 'ecs-cluster'
+        SERVICE_NAME = 'ecs-service'
+        TASK_DEFINITION_FAMILY = 'ecs-task'
+    }
+
+    stages {
+        stage('Checkout') {
+            steps {
+                git 'https://github.com/your-repo.git' // can be any VCS or SVN 
+            }
+        }
+
+        stage('Build Docker Image') {
+            steps {
+                script {
+                    dockerImage = docker.build("${env.ECR_REPO_URI}:latest")
+                }
+            }
+        }
+
+        stage('Push Docker Image to ECR') {
+            steps {
+                script {
+                    docker.withRegistry("https://${env.ECR_REPO_URI}", 'ecr:us-west-2:aws-credentials') {
+                        dockerImage.push('latest')
+                    }
+                }
+            }
+        }
+
+        stage('Update ECS Service') {
+            steps {
+                script {
+                    // Register a new task definition revision
+                    sh """
+                    aws ecs register-task-definition \
+                      --family ${env.TASK_DEFINITION_FAMILY} \
+                      --network-mode awsvpc \
+                      --requires-compatibilities EC2 \
+                      --cpu 256 \
+                      --memory 512 \
+                      --execution-role-arn arn:aws:iam::YOUR_ACCOUNT_ID:role/ecsTaskExecutionRole \
+                      --container-definitions '[
+                        {
+                          "name": "app",
+                          "image": "${env.ECR_REPO_URI}:latest",
+                          "essential": true,
+                          "portMappings": [
+                            {
+                              "containerPort": 80,
+                              "hostPort": 80
+                            }
+                          ]
+                        }
+                      ]'
+                    """
+
+                    // Update ECS service to use the new task definition revision
+                    def taskDefinition = sh(
+                        script: "aws ecs describe-task-definition --task-definition ${env.TASK_DEFINITION_FAMILY} | jq -r .taskDefinition.taskDefinitionArn",
+                        returnStdout: true
+                    ).trim()
+
+                    sh """
+                    aws ecs update-service \
+                      --cluster ${env.CLUSTER_NAME} \
+                      --service ${env.SERVICE_NAME} \
+                      --task-definition ${taskDefinition} \
+                      --force-new-deployment
+                    """
+                }
+            }
+        }
+    }
+}
